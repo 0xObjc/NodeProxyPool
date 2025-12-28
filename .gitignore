@@ -1,0 +1,32 @@
+# 编译产物
+proxypool
+server
+test-mihomo
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Go构建缓存
+.cache/
+go-build/
+
+# 日志文件
+logs/
+*.log
+
+# IDE配置
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# 操作系统文件
+.DS_Store
+Thumbs.db
+
+# 临时文件
+tmp/
+temp/
