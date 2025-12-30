@@ -4,14 +4,18 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
+	"proxyPool"
 	"proxyPool/internal/api"
 	"proxyPool/internal/config"
+	"proxyPool/internal/database"
 	"proxyPool/internal/mihomo"
 	"proxyPool/internal/node"
 	"proxyPool/internal/proxy"
@@ -29,12 +33,39 @@ var (
 func main() {
 	flag.Parse()
 
-	// 加载配置
-	cfg, err := config.Load(*configFile)
+	// 初始化数据库并执行迁移
+	db, err := database.New("./data/proxypool.db")
 	if err != nil {
-		fmt.Printf("Failed to load config: %v\n", err)
+		fmt.Printf("Failed to initialize database: %v\n", err)
 		os.Exit(1)
 	}
+	defer db.Close()
+
+	if err := db.Migrate(); err != nil {
+		fmt.Printf("Failed to migrate database: %v\n", err)
+		os.Exit(1)
+	}
+
+	// 首次运行从 config.yaml 导入
+	if db.IsFirstRun() {
+		cfgFromFile, err := config.Load(*configFile)
+		if err != nil {
+			fmt.Printf("Failed to load config for seeding: %v\n", err)
+			os.Exit(1)
+		}
+		if err := db.SeedFromConfig(config.BuildSeedData(cfgFromFile)); err != nil {
+			fmt.Printf("Failed to seed database: %v\n", err)
+			os.Exit(1)
+		}
+	}
+
+	// 构建动态配置
+	dynamicCfg, err := config.NewDynamicConfig(db)
+	if err != nil {
+		fmt.Printf("Failed to load dynamic config: %v\n", err)
+		os.Exit(1)
+	}
+	cfg := dynamicCfg.Current()
 
 	// 初始化日志
 	if err := logger.Init(cfg.Log.Level, cfg.Log.File); err != nil {
@@ -48,17 +79,30 @@ func main() {
 		zap.String("config", *configFile),
 	)
 
-	// 创建节点池
+	subRepo := database.NewSubscriptionRepository(db)
+	nodeRepo := database.NewNodeRepository(db)
+
+	// 创建节点池并尝试从数据库恢复
 	nodePool := node.NewPool()
+	if nodes, err := nodeRepo.GetAll(); err == nil && len(nodes) > 0 {
+		nodePool.UpdateNodes(nodes)
+		logger.Info("Loaded nodes from database", zap.Int("count", len(nodes)))
+	}
 
 	// 创建订阅管理器
-	subManager := subscription.NewManager(cfg, nodePool)
+	subManager := subscription.NewManager(dynamicCfg, db, nodePool, subRepo, nodeRepo)
 	subManager.Start()
 	defer subManager.Stop()
 
 	// 创建并启动健康检查器
+	var healthChecker *node.HealthChecker
+	defer func() {
+		if healthChecker != nil {
+			healthChecker.Stop()
+		}
+	}()
 	if cfg.HealthCheck.Enabled {
-		healthChecker := node.NewHealthChecker(
+		healthChecker = node.NewHealthChecker(
 			nodePool,
 			cfg.HealthCheck.Interval,
 			cfg.HealthCheck.Timeout,
@@ -67,7 +111,6 @@ func main() {
 			logger.GetLogger(),
 		)
 		healthChecker.Start()
-		defer healthChecker.Stop()
 	}
 
 	// 创建Mihomo适配器
@@ -96,6 +139,37 @@ func main() {
 		logger.GetLogger(),
 	)
 
+	// 绑定配置变更回调
+	dynamicCfg.SetOnProxyConfigChange(func(pc *config.ProxyConfig) {
+		proxyManager.UpdateConfig(pc.MaxInstances, pc.DefaultTTL, pc.DefaultProtocol)
+	})
+	dynamicCfg.SetOnSubscriptionConfigChange(func(sc *config.SubscriptionConfig) {
+		subManager.UpdateConfig(sc)
+	})
+	dynamicCfg.SetOnHealthCheckConfigChange(func(hc *config.HealthCheckConfig) {
+		if hc.Enabled {
+			if healthChecker == nil {
+				healthChecker = node.NewHealthChecker(
+					nodePool,
+					hc.Interval,
+					hc.Timeout,
+					hc.URL,
+					hc.MaxDelay,
+					logger.GetLogger(),
+				)
+				healthChecker.Start()
+				return
+			}
+			healthChecker.UpdateConfig(hc.Interval, hc.Timeout, hc.URL, hc.MaxDelay)
+			return
+		}
+
+		if healthChecker != nil {
+			healthChecker.Stop()
+			healthChecker = nil
+		}
+	})
+
 	// 创建并启动TTL清理器
 	ttlCleaner := proxy.NewTTLCleaner(
 		proxyManager,
@@ -115,17 +189,25 @@ func main() {
 	r.Use(api.Recovery(logger.GetLogger()))
 	r.Use(api.Logger(logger.GetLogger()))
 
+	// 开发环境下启用CORS
+	if cfg.Server.Mode != "release" {
+		r.Use(corsMiddleware())
+	}
+
 	// 健康检查端点
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(200, gin.H{
-			"status": "ok",
+			"status":  "ok",
 			"message": "ProxyPool is running",
 		})
 	})
 
 	// 注册API路由
-	apiHandler := api.NewHandler(subManager, proxyManager)
+	apiHandler := api.NewHandler(subManager, proxyManager, dynamicCfg, subRepo)
 	apiHandler.RegisterRoutes(r)
+
+	// 配置静态文件服务
+	setupStaticFiles(r)
 
 	// 启动HTTP服务器
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
@@ -161,4 +243,58 @@ func main() {
 	}
 
 	logger.Info("ProxyPool stopped")
+}
+
+// corsMiddleware 处理跨域请求(仅用于开发环境)
+func corsMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
+		c.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
+		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With")
+		c.Writer.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS, GET, PUT, DELETE")
+
+		if c.Request.Method == "OPTIONS" {
+			c.AbortWithStatus(204)
+			return
+		}
+
+		c.Next()
+	}
+}
+
+// setupStaticFiles 配置静态文件服务
+func setupStaticFiles(r *gin.Engine) {
+	// 获取嵌入的web/dist目录
+	distFS, err := fs.Sub(proxypool.WebDist, "web/dist")
+	if err != nil {
+		logger.Fatal("Failed to get dist sub filesystem", zap.Error(err))
+	}
+
+	// 1. 静态资源路由 (assets, favicon等)
+	assetsFS, err := fs.Sub(distFS, "assets")
+	if err != nil {
+		logger.Fatal("Failed to get assets sub filesystem", zap.Error(err))
+	}
+	r.StaticFS("/assets", http.FS(assetsFS))
+
+	// 预读 index.html，避免在根路径被 http.FileServer 301 重定向
+	indexContent, err := fs.ReadFile(distFS, "index.html")
+	if err != nil {
+		logger.Fatal("Failed to read index.html from embedded dist", zap.Error(err))
+	}
+
+	// 2. SPA前端路由兜底
+	r.NoRoute(func(c *gin.Context) {
+		// 如果是API请求，返回404 JSON
+		if strings.HasPrefix(c.Request.URL.Path, "/api/") {
+			c.JSON(404, gin.H{
+				"code":    404,
+				"message": "API endpoint not found",
+			})
+			return
+		}
+
+		// 其他请求返回index.html
+		c.Data(http.StatusOK, "text/html; charset=utf-8", indexContent)
+	})
 }
