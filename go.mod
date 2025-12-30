@@ -5,6 +5,7 @@ go 1.24.4
 require (
 	github.com/gin-gonic/gin v1.11.0
 	github.com/google/uuid v1.6.0
+	github.com/mattn/go-sqlite3 v1.14.32
 	github.com/metacubex/mihomo v1.19.18
 	go.uber.org/zap v1.27.1
 	gopkg.in/yaml.v3 v3.0.1
