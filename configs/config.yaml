@@ -26,7 +26,7 @@ health_check:
   enabled: true
   interval: 5m
   timeout: 10s
-  url: "https://www.google.com/generate_204"
+  url: "https://tkglobal.melon.com/main/index.htm?langCd=EN"
   max_delay: 1000
 
 log:

@@ -1,5 +1,12 @@
 # Repository Guidelines
 
+所有沟通、代码注释、文档全部使用**中文**，新文件使用 UTF-8（无 BOM）。
+默认采取破坏性改动并拒绝向后兼容，主动清理过时代码、接口、文档；如无迁移需求需说明"**无迁移，直接替换**"。
+回复格式必须：
+- 在开头提供【前置说明】（简要说明：本次任务、假设、是否调用工具等）。
+- 若有工具/MCP/外部调用，在结尾提供【工具调用简报】（列出用过哪些工具、用途和结论）。
+
+
 ## Project Structure & Modules
 - `cmd/server`: Gin HTTP entrypoint; wires config, logging, subscription manager, health checker, proxy manager.
 - `internal/config`: YAML config structs + validation.
