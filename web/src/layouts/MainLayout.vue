@@ -22,6 +22,14 @@
             <el-icon><Share /></el-icon>
             <span>节点管理</span>
           </el-menu-item>
+          <el-menu-item index="/subscription">
+            <el-icon><Document /></el-icon>
+            <span>订阅管理</span>
+          </el-menu-item>
+          <el-menu-item index="/config">
+            <el-icon><Setting /></el-icon>
+            <span>系统配置</span>
+          </el-menu-item>
           <el-menu-item index="/monitor">
             <el-icon><Monitor /></el-icon>
             <span>实时监控</span>

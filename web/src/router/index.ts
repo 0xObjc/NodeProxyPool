@@ -25,6 +25,16 @@ const router = createRouter({
           component: () => import('@/views/NodeManage.vue')
         },
         {
+          path: 'subscription',
+          name: 'SubscriptionManage',
+          component: () => import('@/views/SubscriptionManage.vue')
+        },
+        {
+          path: 'config',
+          name: 'ConfigManage',
+          component: () => import('@/views/ConfigManage.vue')
+        },
+        {
           path: 'monitor',
           name: 'Monitor',
           component: () => import('@/views/Monitor.vue')
