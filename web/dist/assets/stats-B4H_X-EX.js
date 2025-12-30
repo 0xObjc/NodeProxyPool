@@ -1,0 +1,1 @@
+import{d as s}from"./index-Drd04tA_.js";import{a as o}from"./index-CtHq1u5W.js";import{r as e}from"./element-plus-XK8Oc4qV.js";function n(){return o.get("/stats")}const u=s("stats",()=>{const r=e(null);async function a(){try{const t=await n();r.value=t}catch(t){console.error(t)}}return{stats:r,fetchStats:a}});export{u};
