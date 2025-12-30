@@ -16,6 +16,12 @@ go-build/
 logs/
 *.log
 
+# 数据库文件
+data/
+*.db
+*.db-shm
+*.db-wal
+
 # IDE配置
 .idea/
 .vscode/
