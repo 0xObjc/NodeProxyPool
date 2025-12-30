@@ -1,6 +1,8 @@
 package api
 
 import (
+	"proxyPool/internal/config"
+	"proxyPool/internal/database"
 	"proxyPool/internal/proxy"
 	"proxyPool/internal/subscription"
 
@@ -11,13 +13,17 @@ import (
 type Handler struct {
 	subManager   *subscription.Manager
 	proxyManager *proxy.Manager
+	dynamicCfg   *config.DynamicConfig
+	subRepo      *database.SubscriptionRepository
 }
 
 // NewHandler 创建API处理器
-func NewHandler(subManager *subscription.Manager, proxyManager *proxy.Manager) *Handler {
+func NewHandler(subManager *subscription.Manager, proxyManager *proxy.Manager, dynamicCfg *config.DynamicConfig, subRepo *database.SubscriptionRepository) *Handler {
 	return &Handler{
 		subManager:   subManager,
 		proxyManager: proxyManager,
+		dynamicCfg:   dynamicCfg,
+		subRepo:      subRepo,
 	}
 }
 
@@ -25,17 +31,30 @@ func NewHandler(subManager *subscription.Manager, proxyManager *proxy.Manager) *
 func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api := r.Group("/api")
 	{
-		// 代理管理
 		api.POST("/getProxy", h.GetProxy)
 		api.POST("/releaseProxy", h.ReleaseProxy)
 		api.GET("/getInstance/:id", h.GetInstance)
 		api.GET("/listInstances", h.ListInstances)
 		api.GET("/stats", h.GetStats)
-
-		// 节点池相关
 		api.GET("/nodePool", h.GetNodePool)
 		api.GET("/nodes", h.GetNodes)
-		api.POST("/subscription/update", h.UpdateSubscription)
+		api.POST("/subscription/update", h.TriggerSubscriptionUpdate)
+
+		// 订阅源管理
+		api.GET("/subscriptions", h.ListSubscriptions)
+		api.POST("/subscriptions", h.CreateSubscription)
+		api.GET("/subscriptions/:id", h.GetSubscription)
+		api.PUT("/subscriptions/:id", h.UpdateSubscription)
+		api.DELETE("/subscriptions/:id", h.DeleteSubscription)
+		api.POST("/subscriptions/:id/test", h.TestSubscription)
+
+		// 动态配置
+		api.GET("/config", h.GetAllConfig)
+		api.GET("/config/:category", h.GetConfigByCategory)
+		api.PUT("/config/proxy", h.UpdateProxyConfig)
+		api.PUT("/config/health-check", h.UpdateHealthCheckConfig)
+		api.PUT("/config/subscription", h.UpdateSubscriptionConfig)
+		api.POST("/config/reload", h.ReloadConfig)
 	}
 }
 
@@ -44,23 +63,23 @@ func (h *Handler) GetNodePool(c *gin.Context) {
 	pool := h.subManager.GetNodePool()
 
 	c.JSON(200, gin.H{
-		"code": 0,
+		"code":    0,
 		"message": "success",
 		"data": gin.H{
-			"total_nodes":      pool.Count(),
-			"available_nodes":  pool.CountAvailable(),
-			"nodes_by_type":    pool.CountByType(),
-			"avg_delay":        pool.AvgDelay(),
+			"total_nodes":     pool.Count(),
+			"available_nodes": pool.CountAvailable(),
+			"nodes_by_type":   pool.CountByType(),
+			"avg_delay":       pool.AvgDelay(),
 		},
 	})
 }
 
-// UpdateSubscription 手动更新订阅
-func (h *Handler) UpdateSubscription(c *gin.Context) {
+// TriggerSubscriptionUpdate 手动更新订阅
+func (h *Handler) TriggerSubscriptionUpdate(c *gin.Context) {
 	go h.subManager.UpdateAll()
 
 	c.JSON(200, gin.H{
-		"code": 0,
+		"code":    0,
 		"message": "Update task started",
 	})
 }
@@ -70,7 +89,7 @@ func (h *Handler) GetProxy(c *gin.Context) {
 	var req proxy.CreateProxyRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(400, gin.H{
-			"code": 400,
+			"code":    400,
 			"message": "Invalid request: " + err.Error(),
 		})
 		return
@@ -79,16 +98,16 @@ func (h *Handler) GetProxy(c *gin.Context) {
 	instance, err := h.proxyManager.CreateProxy(&req)
 	if err != nil {
 		c.JSON(500, gin.H{
-			"code": 500,
+			"code":    500,
 			"message": err.Error(),
 		})
 		return
 	}
 
 	c.JSON(200, gin.H{
-		"code": 0,
+		"code":    0,
 		"message": "success",
-		"data": instance.ToResponse(),
+		"data":    instance.ToResponse(),
 	})
 }
 
@@ -100,7 +119,7 @@ func (h *Handler) ReleaseProxy(c *gin.Context) {
 
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(400, gin.H{
-			"code": 400,
+			"code":    400,
 			"message": "Invalid request: " + err.Error(),
 		})
 		return
@@ -109,14 +128,14 @@ func (h *Handler) ReleaseProxy(c *gin.Context) {
 	err := h.proxyManager.ReleaseProxy(req.InstanceID)
 	if err != nil {
 		c.JSON(500, gin.H{
-			"code": 500,
+			"code":    500,
 			"message": err.Error(),
 		})
 		return
 	}
 
 	c.JSON(200, gin.H{
-		"code": 0,
+		"code":    0,
 		"message": "success",
 	})
 }
@@ -128,16 +147,16 @@ func (h *Handler) GetInstance(c *gin.Context) {
 	instance, err := h.proxyManager.GetInstance(instanceID)
 	if err != nil {
 		c.JSON(404, gin.H{
-			"code": 404,
+			"code":    404,
 			"message": err.Error(),
 		})
 		return
 	}
 
 	c.JSON(200, gin.H{
-		"code": 0,
+		"code":    0,
 		"message": "success",
-		"data": instance.ToResponse(),
+		"data":    instance.ToResponse(),
 	})
 }
 
@@ -151,9 +170,9 @@ func (h *Handler) ListInstances(c *gin.Context) {
 	}
 
 	c.JSON(200, gin.H{
-		"code": 0,
+		"code":    0,
 		"message": "success",
-		"data": data,
+		"data":    data,
 	})
 }
 
@@ -162,9 +181,9 @@ func (h *Handler) GetStats(c *gin.Context) {
 	stats := h.proxyManager.GetStats()
 
 	c.JSON(200, gin.H{
-		"code": 0,
+		"code":    0,
 		"message": "success",
-		"data": stats,
+		"data":    stats,
 	})
 }
 
@@ -186,8 +205,8 @@ func (h *Handler) GetNodes(c *gin.Context) {
 	}
 
 	c.JSON(200, gin.H{
-		"code": 0,
+		"code":    0,
 		"message": "success",
-		"data": data,
+		"data":    data,
 	})
 }
