@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"proxyPool/internal/config"
+	"proxyPool/internal/database"
 	"proxyPool/internal/node"
 	"proxyPool/pkg/logger"
 
@@ -17,7 +18,9 @@ type Manager struct {
 	fetcher  *Fetcher
 	parser   *Parser
 	nodePool *node.Pool
-	sources  []config.SubscriptionSource
+	db       *database.DB
+	subRepo  *database.SubscriptionRepository
+	nodeRepo *database.NodeRepository
 	interval time.Duration
 
 	stopCh chan struct{}
@@ -25,13 +28,16 @@ type Manager struct {
 }
 
 // NewManager 创建订阅管理器
-func NewManager(cfg *config.Config, nodePool *node.Pool) *Manager {
+func NewManager(cfg *config.DynamicConfig, db *database.DB, nodePool *node.Pool, subRepo *database.SubscriptionRepository, nodeRepo *database.NodeRepository) *Manager {
+	subCfg := cfg.Current().Subscription
 	return &Manager{
-		fetcher:  NewFetcher(cfg.Subscription.Timeout),
+		fetcher:  NewFetcher(subCfg.Timeout),
 		parser:   NewParser(),
 		nodePool: nodePool,
-		sources:  cfg.Subscription.Sources,
-		interval: cfg.Subscription.UpdateInterval,
+		db:       db,
+		subRepo:  subRepo,
+		nodeRepo: nodeRepo,
+		interval: subCfg.UpdateInterval,
 		stopCh:   make(chan struct{}),
 	}
 }
@@ -39,14 +45,11 @@ func NewManager(cfg *config.Config, nodePool *node.Pool) *Manager {
 // Start 启动自动更新
 func (m *Manager) Start() {
 	logger.Info("Starting subscription manager",
-		zap.Int("sources", len(m.sources)),
 		zap.Duration("interval", m.interval),
 	)
 
-	// 立即执行一次更新
 	m.UpdateAll()
 
-	// 启动定时更新
 	go func() {
 		ticker := time.NewTicker(m.interval)
 		defer ticker.Stop()
@@ -74,17 +77,20 @@ func (m *Manager) UpdateAll() {
 	var allNodes []*node.Node
 	var mu sync.Mutex
 
+	sources, err := m.loadSources()
+	if err != nil {
+		logger.Error("Failed to load subscription sources", zap.Error(err))
+		return
+	}
+
 	var wg sync.WaitGroup
-	for _, source := range m.sources {
+	for _, source := range sources {
 		if !source.Enabled {
-			logger.Debug("Skipping disabled subscription",
-				zap.String("name", source.Name),
-			)
 			continue
 		}
 
 		wg.Add(1)
-		go func(src config.SubscriptionSource) {
+		go func(src *database.SubscriptionSource) {
 			defer wg.Done()
 
 			nodes, err := m.UpdateOne(src)
@@ -93,13 +99,19 @@ func (m *Manager) UpdateAll() {
 					zap.String("name", src.Name),
 					zap.Error(err),
 				)
+				_ = m.subRepo.UpdateFetchStatus(src.ID, "failed", err.Error(), 0)
 				return
+			}
+
+			if err := m.nodeRepo.UpsertBatch(nodes, &src.ID); err != nil {
+				logger.Warn("Persist nodes failed", zap.Error(err))
 			}
 
 			mu.Lock()
 			allNodes = append(allNodes, nodes...)
 			mu.Unlock()
 
+			_ = m.subRepo.UpdateFetchStatus(src.ID, "success", "", len(nodes))
 			logger.Info("Subscription updated",
 				zap.String("name", src.Name),
 				zap.Int("nodes", len(nodes)),
@@ -109,7 +121,6 @@ func (m *Manager) UpdateAll() {
 
 	wg.Wait()
 
-	// 更新节点池
 	if len(allNodes) > 0 {
 		m.nodePool.UpdateNodes(allNodes)
 		logger.Info("Node pool updated",
@@ -121,14 +132,12 @@ func (m *Manager) UpdateAll() {
 }
 
 // UpdateOne 更新单个订阅源
-func (m *Manager) UpdateOne(source config.SubscriptionSource) ([]*node.Node, error) {
-	// 抓取订阅内容
+func (m *Manager) UpdateOne(source *database.SubscriptionSource) ([]*node.Node, error) {
 	content, err := m.fetcher.Fetch(source.URL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch: %w", err)
 	}
 
-	// 解析节点
 	nodes, err := m.parser.Parse(content)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse: %w", err)
@@ -137,7 +146,37 @@ func (m *Manager) UpdateOne(source config.SubscriptionSource) ([]*node.Node, err
 	return nodes, nil
 }
 
+// ReloadSources 从数据库刷新订阅源列表
+func (m *Manager) ReloadSources() error {
+	_, err := m.loadSources()
+	return err
+}
+
+// TestSubscription 只抓取不落库
+func (m *Manager) TestSubscription(source *database.SubscriptionSource) ([]*node.Node, error) {
+	return m.UpdateOne(source)
+}
+
+// UpdateConfig 更新订阅相关配置
+func (m *Manager) UpdateConfig(cfg *config.SubscriptionConfig) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.interval = cfg.UpdateInterval
+	m.fetcher = NewFetcher(cfg.Timeout)
+}
+
 // GetNodePool 获取节点池
 func (m *Manager) GetNodePool() *node.Pool {
 	return m.nodePool
+}
+
+func (m *Manager) loadSources() ([]*database.SubscriptionSource, error) {
+	sources, err := m.subRepo.GetEnabled()
+	if err != nil {
+		return nil, err
+	}
+	if len(sources) == 0 {
+		logger.Warn("No enabled subscription sources in database")
+	}
+	return sources, nil
 }

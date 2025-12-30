@@ -19,6 +19,8 @@ type HealthChecker struct {
 	ctx           context.Context
 	cancel        context.CancelFunc
 	wg            sync.WaitGroup
+	mu            sync.Mutex
+	started       bool
 }
 
 // NewHealthChecker 创建健康检查器
@@ -30,7 +32,6 @@ func NewHealthChecker(
 	maxDelay int,
 	logger *zap.Logger,
 ) *HealthChecker {
-	ctx, cancel := context.WithCancel(context.Background())
 	return &HealthChecker{
 		pool:          pool,
 		checkInterval: checkInterval,
@@ -38,13 +39,20 @@ func NewHealthChecker(
 		testURL:       testURL,
 		maxDelay:      maxDelay,
 		logger:        logger,
-		ctx:           ctx,
-		cancel:        cancel,
 	}
 }
 
 // Start 启动健康检查
 func (h *HealthChecker) Start() {
+	h.mu.Lock()
+	if h.started {
+		h.mu.Unlock()
+		return
+	}
+	h.ctx, h.cancel = context.WithCancel(context.Background())
+	h.started = true
+	h.mu.Unlock()
+
 	h.logger.Info("Health checker started",
 		zap.Duration("interval", h.checkInterval),
 		zap.String("test_url", h.testURL))
@@ -55,9 +63,36 @@ func (h *HealthChecker) Start() {
 
 // Stop 停止健康检查
 func (h *HealthChecker) Stop() {
-	h.cancel()
+	h.mu.Lock()
+	if !h.started {
+		h.mu.Unlock()
+		return
+	}
+	cancel := h.cancel
+	h.started = false
+	h.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
 	h.wg.Wait()
 	h.logger.Info("Health checker stopped")
+}
+
+// UpdateConfig 动态更新配置并重启
+func (h *HealthChecker) UpdateConfig(interval, timeout time.Duration, url string, maxDelay int) {
+	h.mu.Lock()
+	running := h.started
+	h.checkInterval = interval
+	h.checkTimeout = timeout
+	h.testURL = url
+	h.maxDelay = maxDelay
+	h.mu.Unlock()
+
+	if running {
+		h.Stop()
+	}
+	h.Start()
 }
 
 // run 运行健康检查循环

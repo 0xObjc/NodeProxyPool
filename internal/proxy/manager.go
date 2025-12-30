@@ -210,6 +210,17 @@ func (m *Manager) GetStats() map[string]interface{} {
 	}
 }
 
+// UpdateConfig 动态更新核心配置
+func (m *Manager) UpdateConfig(maxInstances int, defaultTTL time.Duration, defaultProtocol string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.maxInstances = maxInstances
+	m.defaultTTL = defaultTTL
+	if defaultProtocol != "" {
+		m.defaultProtocol = defaultProtocol
+	}
+}
+
 // selectNode 智能选择节点
 // 按延迟、类型、地区等条件过滤,返回最优节点
 func (m *Manager) selectNode(req *CreateProxyRequest) *node.Node {

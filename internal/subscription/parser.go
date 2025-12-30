@@ -53,8 +53,8 @@ func (p *Parser) Parse(content []byte) ([]*node.Node, error) {
 		n := &node.Node{
 			ID:        generateNodeID(proxyConfig),
 			RawConfig: proxyConfig,
-			Available: true,  // 初始标记为可用
-			Delay:     -1,    // 待健康检查
+			Available: true, // 初始标记为可用
+			Delay:     -1,   // 待健康检查
 		}
 
 		// 提取基本信息
